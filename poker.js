@@ -80,12 +80,10 @@ export class Table {
     this.log('新的一场开始，每人 1000 分，盲注 10 / 20'); this.newHand(online);
   }
   end() {
-    if(!this.running) throw Error('当前没有进行中的牌局');
-    if(this.hand&&!this.hand.done) {
-      for(const x of this.hand.seats) this.players.find(p=>p.id===x.id).chips+=x.total;
-      this.log('管理员结束本场：当前未完成手牌撤销，退还本手全部下注');
-    } else this.log('管理员结束本场');
-    this.running=false;this.hand=null;this.nextAt=0;this.paused=false;this.pausedAt=0; this.message='本场已结束，等待管理员重新开始';
+    if(this.hand&&!this.hand.done)this.log('管理员结束本场：撤销当前未完成手牌');
+    this.players.forEach(p=>{p.chips=1000;p.eliminated=false;p.waiting=false;p.sittingOut=false;p.timeouts=0;});
+    this.log('管理员结束并重置积分，所有玩家恢复为 1000 分');
+    this.running=false;this.hand=null;this.nextAt=0;this.paused=false;this.pausedAt=0; this.message='所有玩家积分已重置为 1000，等待管理员开始';
   }
   newHand(online=()=>true,now=Date.now()) {
     if(!this.running) return;

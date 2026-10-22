@@ -141,7 +141,7 @@ function render(){
     if(atBottom)box.scrollTop=box.scrollHeight;
   }
   $('admin-controls').hidden=!s.admin;$('become-admin').hidden=s.admin;$('role').textContent=s.admin?'管理员':'玩家';
-  $('start').disabled=s.running||s.players.length<2||!online;$('end').disabled=!s.running||!online;
+  $('start').disabled=s.running||s.players.length<2||!online;$('end').disabled=!s.players.length||!online;$('end').textContent=s.running?'结束并重置':'重置积分';
   $('remove-controls').replaceChildren();
   if(s.admin&&!s.running)s.players.filter(p=>p.id!==s.me).forEach(p=>{const row=el('div','remove-row');row.append(el('span','',p.name));const b=el('button','quiet','移除座位');b.onclick=()=>{removeId=p.id;$('remove-name').textContent=p.name;$('remove-dialog').showModal();};row.append(b);$('remove-controls').append(row);});
   updateActions();
@@ -191,7 +191,7 @@ $('confirm-remove').onclick=()=>perform(async()=>{await api('remove',{id:removeI
 $('raise').onclick=()=>perform(()=>api('action',{action:'raise',amount:Number($('amount').value)}));
 $('allin').onclick=()=>perform(()=>api('action',state.legal.maxTo>state.hand.currentBet?{action:'raise',amount:state.legal.maxTo}:{action:'call'}));
 $('start').onclick=()=>perform(()=>api('start'));
-$('end').onclick=()=>$('end-dialog').showModal();$('cancel-end').onclick=()=>$('end-dialog').close();
+$('end').onclick=()=>{document.querySelector('#end-dialog h2').textContent=state.running?'结束本场并重置积分？':'重置所有玩家积分？';$('confirm-end').textContent=state.running?'结束并重置':'重置积分';$('end-dialog').showModal();};$('cancel-end').onclick=()=>$('end-dialog').close();
 $('confirm-end').onclick=()=>perform(async()=>{await api('end');$('end-dialog').close();});
 $('code-form').onsubmit=e=>{e.preventDefault();perform(async()=>{await api('code',{entryCode:$('entry-code').value});$('entry-code').value='';toast('入口令已修改，已入座玩家不受影响');});};
 $('become-admin').onclick=()=>$('admin-dialog').showModal();$('cancel-admin').onclick=()=>$('admin-dialog').close();

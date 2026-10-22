@@ -18,11 +18,24 @@ test('牌堆唯一，底牌隔离，单挑盲注与行动顺序',()=>{
   t.act('a','call');assert.equal(t.hand.seats[t.hand.turn].id,'b');t.act('b','call');
   assert.equal(t.hand.street,1);assert.equal(t.hand.seats[t.hand.turn].id,'b');
 });
-test('非法操作没有改变筹码，结束退回下注',()=>{
+test('非法操作没有改变筹码，结束后立即重置积分',()=>{
   const t=new Table();t.add('a','甲');t.add('b','乙');t.start();
   assert.throws(()=>t.act('b','raise',100));assert.throws(()=>t.act('a','raise',25));
   assert.throws(()=>t.act('a','raise',NaN));assert.equal(t.players[0].chips,990);
   t.act('a','raise',100);t.end();assert.deepEqual(t.players.map(p=>p.chips),[1000,1000]);
+});
+
+test('结束立即重置赢家、离线下场和中途加入者；自然结束后无需重新开场也可重置',()=>{
+  const t=new Table();t.add('a','甲');t.add('b','乙');t.start();
+  t.act('a','fold');assert.notEqual(t.players[0].chips,1000);
+  t.add('c','迟到者');t.players[1].chips=0;t.players[1].eliminated=true;t.players[1].sittingOut=true;t.players[1].timeouts=2;
+  const names=t.players.map(p=>[p.id,p.name]),history=t.history.length;
+  t.end();assert.equal(t.running,false);assert.equal(t.hand,null);assert.equal(t.nextAt,0);
+  assert.deepEqual(t.players.map(p=>[p.id,p.name]),names);assert.ok(t.history.length>history);
+  assert.ok(t.players.every(p=>p.chips===1000&&!p.eliminated&&!p.waiting&&!p.sittingOut&&p.timeouts===0));
+  t.players[0].chips=3000;t.players[1].chips=0;t.players[1].eliminated=true;
+  t.end();assert.ok(t.players.every(p=>p.chips===1000&&!p.eliminated));
+  const restored=new Table(JSON.parse(JSON.stringify(t)));assert.ok(restored.players.every(p=>p.chips===1000));
 });
 
 test('每轮操作显示跟注、弃牌、过牌、加注；换轮清理操作而弃牌保持',()=>{

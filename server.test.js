@@ -55,6 +55,7 @@ test('真实 HTTP 多人流程、权限、底牌隔离、口令变更和重启�
     assert.equal((await post('join',{name:'迟到的朋友',password:'new-test-code'})).status,200);
     assert.equal((await post('end',{},admin)).status,200);
     const before=await snapshot(admin);
+    assert.ok(before.players.every(p=>p.chips===1000&&!p.eliminated&&!p.waiting&&!p.sittingOut));assert.equal(before.hand,null);assert.equal(before.running,false);
     await stop();await boot();const after=await snapshot(admin);
     const persisted=players=>players.map(({online,...p})=>p);
     assert.deepEqual(persisted(after.players),persisted(before.players));assert.deepEqual(after.history,before.history);assert.equal(after.admin,true);
@@ -180,5 +181,23 @@ test('快捷聊天真实双人同步：身份取自 Cookie、限制刷屏、重�
     assert.equal((await f.post('chat',{text:'到你了'},b)).status,200);
     let next=await reload.next();while(!next.events?.length)next=await reload.next();
     assert.ok(next.events.every(e=>e.seq>seq));assert.deepEqual(next.events.map(e=>e.text),['到你了']);
+  }finally{opened.forEach(s=>s.close());await f.close();}
+});
+
+test('仅管理员在线也能重置积分，实时推送且刷新后仍为 1000',async()=>{
+  const f=await connectionFixture(),opened=[];
+  try{
+    const admin=(await f.post('join',{name:'管理员',admin:true,password:'test-admin-password'})).cookie;
+    const friend=(await f.post('join',{name:'朋友',password:'test-code'})).cookie;
+    const a=await f.stream(admin),b=await f.stream(friend);opened.push(a,b);
+    assert.equal((await f.post('start',{},admin)).status,200);
+    const live=await f.stream(admin);opened.push(live);assert.notEqual(live.state.players.find(p=>p.id===live.state.me).chips,1000);
+    assert.equal((await f.post('end',{},friend)).status,400);
+    b.close();await f.offline(friend);
+    assert.equal((await f.post('end',{},admin)).status,200);
+    let reset=await live.next();while(reset.running)reset=await live.next();
+    assert.equal(reset.hand,null);assert.ok(reset.players.every(p=>p.chips===1000));
+    const reload=await f.stream(admin);opened.push(reload);assert.ok(reload.state.players.every(p=>p.chips===1000));
+    assert.equal((await f.post('end',{},admin)).status,200);
   }finally{opened.forEach(s=>s.close());await f.close();}
 });

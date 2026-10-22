@@ -12,6 +12,7 @@ Environment=HOST=127.0.0.1
 Environment=PORT=3000
 Environment=DATA_DIR=/var/lib/friends-holdem
 Environment=SECURE_COOKIE=1
+Environment=TRUST_PROXY=1
 ExecStart=/usr/bin/node /opt/friends-holdem/server.js
 Restart=on-failure
 RestartSec=3

@@ -3,3 +3,15 @@ node_modules/
 *.log
 /friends-holdem.zip
 /preview*.png
+
+# Local credentials and environment settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.zip
+state.json
+state.json.tmp

@@ -28,12 +28,13 @@ const hash=s=>{const salt=randomBytes(16).toString('hex');return {salt,value:scr
 const verify=(s,h)=>!!h&&timingSafeEqual(scryptSync(s,h.salt,32),Buffer.from(h.value,'hex'));
 const persist=()=>{writeFileSync(savePath+'.tmp',JSON.stringify({config,table,sessions:[...sessions]}),{mode:0o600});renameSync(savePath+'.tmp',savePath);};
 function snapshot(session){const view=table.view(session.playerId);view.players.forEach(p=>p.online=connectionState(p.id).online);return {...view,me:session.playerId,admin:!!session.admin,serverTime:Date.now()};}
-function broadcast(except){persist();for(const c of streams){if(c===except)continue;const view=snapshot(c.session);view.history=view.history.filter(x=>x.seq>c.seq);view.historyReset=false;c.seq=table.logSeq;c.res.write(`data: ${JSON.stringify(view)}\n\n`);}}
+function broadcast(except){persist();for(const c of streams){if(c===except)continue;const view=snapshot(c.session);view.history=view.history.filter(x=>x.seq>c.seq);view.events=view.events.filter(x=>x.seq>c.eventSeq);view.historyReset=false;c.seq=table.logSeq;c.eventSeq=table.eventSeq;c.res.write(`data: ${JSON.stringify(view)}\n\n`);}}
 function send(res,code,obj,headers={}){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...headers});res.end(JSON.stringify(obj));}
 function requireAdmin(s){if(!s?.admin)throw Error('需要管理员权限');}
 function pass(value,label,min=4){if(typeof value!=='string'||value.length<min||value.length>100)throw Error(`${label}需要 ${min}～100 个字符`);return value;}
 function sessionFor(req){const token=/\bsession=([a-zA-Z0-9_-]+)/.exec(req.headers.cookie||'')?.[1];return sessions.get(token);}
-function acceptedAuth(req){const a=attempts.get(req.socket.remoteAddress);if(a)a.count=Math.max(0,a.count-1);}
+function authIp(req){const peer=req.socket.remoteAddress;return process.env.TRUST_PROXY==='1'&&['127.0.0.1','::1','::ffff:127.0.0.1'].includes(peer)?req.headers['x-real-ip']||peer:peer;}
+function acceptedAuth(req){const a=attempts.get(authIp(req));if(a)a.count=Math.max(0,a.count-1);}
 async function body(req){let text='';for await(const chunk of req){text+=chunk;if(text.length>4096)throw Error('请求过大');}return JSON.parse(text||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');
@@ -44,16 +45,16 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='GET'&&route==='/api/events'){
       const session=sessionFor(req);if(!session){send(res,401,{error:'请先加入牌桌'});return;}
       res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});
-      const client={res,session,seq:table.logSeq,heartbeat:url.searchParams.get('v')==='2'};streams.add(client);touch(session.playerId);
+      const client={res,session,seq:table.logSeq,eventSeq:table.eventSeq,heartbeat:url.searchParams.get('v')==='2'};streams.add(client);touch(session.playerId);
       res.write(`data: ${JSON.stringify({...snapshot(session),historyReset:true})}\n\n`);broadcast(client);
       req.on('close',()=>{streams.delete(client);if(!hasConnection(session.playerId)){const p=presence.get(session.playerId);if(p)p.offlineAt=Date.now();}broadcast();});return;
     }
     if(req.method==='POST'&&route.startsWith('/api/')){
       if(req.headers.origin&&new URL(req.headers.origin).host!==req.headers.host){send(res,403,{error:'请求来源无效'});return;}
       if(['/api/setup','/api/join','/api/admin'].includes(route)){
-        const ip=req.socket.remoteAddress,now=Date.now();let a=attempts.get(ip);
+        const ip=authIp(req),now=Date.now();let a=attempts.get(ip);
         if(!a||now-a.since>60000){a={since:now,count:0};attempts.set(ip,a);}
-        if(++a.count>15){send(res,429,{error:'尝试次数过多，请一分钟后再试'});return;}
+        if(++a.count>10){const retryAfter=Math.max(1,Math.ceil((a.since+60000-now)/1000));send(res,429,{error:`密码错误已达 10 次，请 ${retryAfter} 秒后再试`,retryAfter},{'Retry-After':String(retryAfter)});return;}
       }
       const b=await body(req),s=sessionFor(req);
       if(route==='/api/setup'){
@@ -87,8 +88,10 @@ const server=http.createServer(async(req,res)=>{
       if(!s){send(res,401,{error:'请先加入牌桌'});return;}
       touch(s.playerId);
       if(route==='/api/heartbeat'){send(res,200,{ok:true});return;}
-      if(route==='/api/action')table.act(s.playerId,b.action,b.amount);
-      else if(route==='/api/start'){requireAdmin(s);table.start();}
+      if(route==='/api/action'){if(table.paused)throw Error('牌局已暂停，等待玩家返回');table.act(s.playerId,b.action,b.amount);}
+      else if(route==='/api/chat')table.chat(s.playerId,b.text);
+      else if(route==='/api/resume')table.resume(s.playerId);
+      else if(route==='/api/start'){requireAdmin(s);table.start(id=>connectionState(id).online);}
       else if(route==='/api/end'){requireAdmin(s);table.end();}
       else if(route==='/api/code'){requireAdmin(s);config.entry=hash(pass(b.entryCode,'入口令'));table.log('管理员已修改入口令');}
       else if(route==='/api/admin'){if(typeof b.password!=='string'||b.password.length>100||!verify(b.password,config.admin))throw Error('管理员密码错误');acceptedAuth(req);s.admin=true;}
@@ -102,7 +105,7 @@ const server=http.createServer(async(req,res)=>{
       }else throw Error('接口不存在');
       broadcast();send(res,200,{ok:true});return;
     }
-    if(req.method==='GET'&&['/','/index.html','/app.js','/style.css'].includes(route)){
+    if(req.method==='GET'&&['/','/index.html','/app.js','/audio.js','/style.css'].includes(route)){
       const file=route==='/'?'index.html':route.slice(1);
       res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript; charset=utf-8':file.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8','Cache-Control':'no-cache'});res.end(readFileSync(path.join(root,'public',file)));return;
     }
@@ -111,9 +114,7 @@ const server=http.createServer(async(req,res)=>{
 });
 const timer=setInterval(()=>{
   try{
-    const h=table.hand;
-    if(table.running&&h&&!h.done&&Date.now()>=h.deadline){const id=h.seats[h.turn].id,l=table.legal(id);table.log('行动超时，自动处理');table.act(id,l.toCall?'fold':'call');broadcast();}
-    else if(table.running&&h?.done&&Date.now()>=table.nextAt){table.newHand();broadcast();}
+    if(table.tick(Date.now(),id=>connectionState(id).online,id=>connectionState(id).retryAfter===0))broadcast();
   }catch(e){console.error(e);}
 },1000);
 const heartbeat=setInterval(()=>{for(const c of streams)c.res.write(': heartbeat\n\n');for(const [ip,a]of attempts)if(Date.now()-a.since>60000)attempts.delete(ip);},20000);

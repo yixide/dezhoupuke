@@ -39,6 +39,12 @@ test('真实 HTTP 多人流程、权限、底牌隔离、口令变更和重启�
     const tokenById={[a.me]:admin,[b.me]:friend};
     for(let i=0;i<12&&!a.hand.done;i++){
       assert.equal((await post('action',{action:'call'},tokenById[a.hand.turn])).status,200);a=await snapshot(admin);
+      if(a.hand.transitionAt){
+        assert.equal(a.hand.turn,null);assert.equal(a.legal,null);assert.equal(a.hand.deadline,0);
+        const deadline=Date.now()+5000;
+        do{await delay(100);a=await snapshot(admin);}while(a.hand.transitionAt&&Date.now()<deadline);
+        assert.equal(a.hand.transitionAt,0);
+      }
     }
     assert.equal(a.hand.done,true);assert.equal(a.players.reduce((n,p)=>n+p.chips,0),2000);
     assert.equal(a.hand.board.length,5);assert.ok(a.history.some(x=>x.text.includes('摊牌')));

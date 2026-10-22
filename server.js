@@ -116,7 +116,7 @@ const timer=setInterval(()=>{
   try{
     if(table.tick(Date.now(),id=>connectionState(id).online,id=>connectionState(id).retryAfter===0))broadcast();
   }catch(e){console.error(e);}
-},1000);
+},250);
 const heartbeat=setInterval(()=>{for(const c of streams)c.res.write(': heartbeat\n\n');for(const [ip,a]of attempts)if(Date.now()-a.since>60000)attempts.delete(ip);},20000);
 server.listen(Number(process.env.PORT)||3000,process.env.HOST||'0.0.0.0',()=>{
   console.log(`朋友德州已启动：http://localhost:${server.address().port}`);

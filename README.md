@@ -30,6 +30,10 @@ npm start
 npm test
 ```
 
+本地机器人陪练运行 `npm run practice`，打开 `http://localhost:3002/`。只监听本机，使用独立的 `data/local-practice/` 数据；练习用口令保存在该目录的 `credentials.json`，不会提交到仓库。管理员开始后，两位机器人每次思考 5～7 秒，再自动跟注、过牌或少量加注。玩家最近一次操作保留到他再次行动或本手结束，只显示操作本身，不显示轮次前缀或“待行动”；“庄”表示庄家，“先手”表示本轮第一个行动的人。
+
+每轮下注完成后停留 3 秒，保留最后一人的操作及本轮下注，再发下一轮公共牌或摊牌。展示期间不允许操作，也不消耗下一位玩家的行动时间；全员离线时展示计时一起暂停。
+
 ## 部署
 
 项目提供 [systemd 服务示例](deploy/friends-holdem.service) 和 [Nginx 配置示例](deploy/nginx.conf)。Linux 上将代码放入 `/opt/friends-holdem`，创建 `holdem` 系统用户，核对服务中的 Node 路径，再安装并启动服务：

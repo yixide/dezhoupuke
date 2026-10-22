@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node server.js", "test": "node --test poker.test.js server.test.js" },
+  "scripts": { "start": "node server.js", "practice": "node scripts/local-practice.mjs", "test": "node --test poker.test.js server.test.js" },
   "engines": { "node": ">=22" }
 }

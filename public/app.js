@@ -84,10 +84,10 @@ function render(){
   clockOffset=state.serverTime-Date.now();
   const s=state,h=s.hand,me=s.players.find(p=>p.id===s.me);
   if(!me){location.reload();return;}
-  $('phase').textContent=h?`${h.done?'本手结束':['翻牌前','翻牌','转牌','河牌'][h.street]} · 第 ${h.number} 手`:'等待开场';
+  $('phase').textContent=h?`第 ${h.number} 手${h.done?' · 本手结束':''}`:'等待开场';
   cards($('board'),[...(h?.board||[]),...Array(5-(h?.board.length||0)).fill(null)],true);
   $('pot').textContent=(h?.pot||0).toLocaleString();
-  $('table-message').textContent=s.paused?'牌局暂停，等待至少两位在线玩家参与':h?.done?s.message:!s.running?s.message:`${s.players.find(p=>p.id===h?.turn)?.name||''} 正在思考`;
+  $('table-message').textContent=s.paused?'牌局暂停，等待至少两位在线玩家参与':h?.done?s.message:!s.running?s.message:h?.transitionAt?'本轮操作展示中，3 秒后继续':`${s.players.find(p=>p.id===h?.turn)?.name||''} 正在思考`;
   $('hand-number').textContent=s.number?`第 ${s.number} 手`:'尚未开始';
   const mySeat=h?.seats.find(x=>x.id===s.me);
   renderSettlement();
@@ -107,13 +107,18 @@ function render(){
       const timer=el('div','seat-timer');timer.setAttribute('role','timer');
       timer.append($('clock').querySelector('svg').cloneNode(true),el('strong','seat-seconds','45'),el('span','','秒'));head.append(timer);
     }
-    head.append(el('div','seat-name',p.name+(p.id===s.me?' · 你':'')),el('div','seat-score',p.chips.toLocaleString()));
+    const name=el('div','seat-name',p.name+(p.id===s.me?' · 你':''));
+    if(h?.firstToAct===p.id){const first=el('span','first-actor','先手');first.title='本轮第一个行动的人';name.prepend(first);}
+    head.append(name,el('div','seat-score',p.chips.toLocaleString()));
     if(x&&(!h.done||x.folded)){
-      const action=x.folded?'弃牌':x.lastAction?.text||(p.chips===0?'All-in':'待行动');
-      const badge=el('div',`seat-action action-${x.folded?'fold':x.lastAction?.kind||'waiting'}`,action);
-      badge.title=action;head.append(badge);
-      const trail=(h.actions||[]).filter(a=>a.id===p.id).map(a=>a.text).join(' → ');
-      if(trail)badge.title=`本轮操作：${trail}`;
+      const recent=!x.lastAction&&!x.folded&&x.recentAction?.street<h.street?x.recentAction:null;
+      const action=x.folded?'弃牌':x.lastAction?.text||recent?.text||(p.chips===0?'All-in':'');
+      if(action){
+        const badge=el('div',`seat-action action-${x.folded?'fold':x.lastAction?.kind||recent?.kind||'allin'}${recent?' action-recent':''}`,action);
+        badge.title=action;head.append(badge);
+        const trail=(h.actions||[]).filter(a=>a.id===p.id).map(a=>a.text).join(' → ');
+        if(trail)badge.title=`本轮操作：${trail}`;
+      }
     }
     if(x){
       const wagers=el('div','seat-wagers');wagers.classList.toggle('settled',!!h.done);
@@ -123,12 +128,12 @@ function render(){
       if(!h.done)addWager('本轮',x.bet,'wager-round');
       addWager(h.done?'本手已下':'累计',x.total,'wager-total');head.append(wagers);
     }
-    if(h?.dealer===p.id)head.append(el('div','dealer','D'));
+    if(h?.dealer===p.id){const dealer=el('div','dealer','庄');dealer.title='庄家（D），不一定是第一个行动的人';dealer.setAttribute('aria-label','庄家');head.append(dealer);}
     seat.append(head);
     if(result?.won){head.append(el('span','winner-badge','🏆 胜出'));head.append(el('div','seat-gain',`收入 +${result.won.toLocaleString()}`));}
     if(p.chat&&p.chat.at+6000>Date.now()+clockOffset){
       const bubble=el('div','chat-bubble');bubble.dataset.expires=p.chat.at+6000;bubble.setAttribute('role','status');
-      bubble.append(el('strong','',`${p.name}说`),el('span','',p.chat.text));head.append(bubble);
+      bubble.append(el('strong','',p.name),el('span','',p.chat.text));head.append(bubble);
     }
     const cs=el('div','cards');if(x)cards(cs,x.cards);seat.append(cs);
     seat.append(el('div','seat-status',result?`${result.place?`第 ${result.place} 名 · `:''}${result.detail||result.label}`:p.online===false?'离线，可重连':p.eliminated?'已下场':p.sittingOut?'暂离':p.waiting?'下一手加入':x?.folded?'已弃牌':x&&p.chips===0?'All-in':h?.turn===p.id?'思考中':'已入座'));
@@ -152,7 +157,7 @@ function updateActions(){
   for(const id of ['fold','call','raise','allin','amount'])$(id).disabled=!enabled;
   if(!s)return;
   const me=s.players.find(p=>p.id===s.me);
-  $('action-hint').textContent=!online?'连接恢复后才能操作':!s.running?'等待管理员开始本场':me?.eliminated?'分数用完，本场已下场':me?.sittingOut?'已暂离，点击“返回牌桌”后下一手参与':s.paused?'牌局暂停，等待在线玩家返回':me?.waiting?'下一手自动加入，现有积分不重置':s.hand?.done?'本手已结算，稍后自动继续':l?(l.toCall?`轮到你 · 需跟注 ${l.call} 分`:'轮到你 · 可以过牌'): '等待其他玩家行动';
+  $('action-hint').textContent=!online?'连接恢复后才能操作':!s.running?'等待管理员开始本场':me?.eliminated?'分数用完，本场已下场':me?.sittingOut?'已暂离，点击“返回牌桌”后下一手参与':s.paused?'牌局暂停，等待在线玩家返回':me?.waiting?'下一手自动加入，现有积分不重置':s.hand?.done?'本手已结算，稍后自动继续':s.hand?.transitionAt?'本轮操作展示中，稍后继续':l?(l.toCall?`轮到你 · 需跟注 ${l.call} 分`:'轮到你 · 可以过牌'): '等待其他玩家行动';
   if(lastSettlement){const review=el('button','review-result',s.hand?.done?'查看结算':'上手结算');review.onclick=showSettlement;$('action-hint').append(review);}
   chatOpen.disabled=!online;$('action-hint').append(chatOpen,soundToggle);
   $('call').textContent=me?.sittingOut?'返回牌桌':l?.toCall?`跟注 ${l.call}`:'过牌';
@@ -222,7 +227,7 @@ $('admin-form').onsubmit=e=>{e.preventDefault();perform(async()=>{await api('adm
 function updateClock(){
   for(const bubble of document.querySelectorAll('.chat-bubble'))bubble.hidden=Date.now()+clockOffset>=Number(bubble.dataset.expires);
   const h=state?.hand,clock=$('clock');
-  const active=!!h&&!h.done&&state.running&&!state.paused,mine=active&&h.turn===state.me;
+  const active=!!h&&!h.done&&!h.transitionAt&&state.running&&!state.paused,mine=active&&h.turn===state.me;
   clock.hidden=!mine;
   if(!active)return;
   const seconds=Math.max(0,Math.ceil((h.deadline-Date.now()-clockOffset)/1000));

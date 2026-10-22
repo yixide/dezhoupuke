@@ -31,7 +31,7 @@ export class RoomAudio {
   drain(){
     if(this.current||!this.enabled||!this.queue.length)return;
     const event=this.queue.shift();if(Date.now()-event.at>10000){this.drain();return;}
-    const text=event.type==='chat'?`${event.name}说，${event.text}`:`${event.name}，${event.text}`;
+    const text=event.type==='chat'?event.text:`${event.name}，${event.text}`;
     if(!window.speechSynthesis||!window.SpeechSynthesisUtterance){this.beep(event);this.drain();return;}
     const utterance=new SpeechSynthesisUtterance(text);this.current=utterance;
     utterance.lang='zh-CN';utterance.rate=1.15;

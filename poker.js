@@ -121,10 +121,15 @@ export class Table {
         if(this.players.filter(p=>p.chips>0&&!p.eliminated&&!p.sittingOut&&online(p.id)).length<2)return false;
         this.newHand(online,now);return true;
       }
-      h.deadline+=now-this.pausedAt;this.paused=false;this.pausedAt=0;this.log('玩家返回，继续本手');
+      if(h.transitionAt)h.transitionAt+=now-this.pausedAt;else h.deadline+=now-this.pausedAt;
+      this.paused=false;this.pausedAt=0;this.log('玩家返回，继续本手');
       return true;
     }
     if(!h||h.done){if(!h||now>=this.nextAt){this.newHand(online,now);return true;}return false;}
+    if(h.transitionAt){
+      if(now<h.transitionAt)return false;
+      h.transitionAt=0;this.advance(h.turn,true);return true;
+    }
     const id=h.seats[h.turn].id,disconnected=!online(id)&&offlineReady(id);
     const p=this.players.find(p=>p.id===id),l=this.legal(id),wasAway=!!p.sittingOut;
     if(now<h.deadline&&!disconnected&&!wasAway)return false;
@@ -135,17 +140,17 @@ export class Table {
   }
   player(s) {return this.players.find(p=>p.id===s.id);}
   recordAction(id,kind,text,automatic=false) {
-    const s=this.hand.seats.find(s=>s.id===id),entry={id,name:this.player(s).name,kind,text:(automatic?'自动':'')+text};
-    s.lastAction=entry;(this.hand.actions??=[]).push(entry);
+    const s=this.hand.seats.find(s=>s.id===id),entry={id,name:this.player(s).name,kind,text:(automatic?'自动':'')+text,street:this.hand.street,at:Date.now()};
+    s.lastAction=entry;s.recentAction=entry;(this.hand.actions??=[]).push(entry);
     this.emit('action',entry);
   }
   pay(index,amount) {const s=this.hand.seats[index],p=this.player(s),n=Math.min(p.chips,amount);p.chips-=n;s.bet+=n;s.total+=n;return n;}
   setTurn(from) {
     const h=this.hand;
-    for(let i=0;i<h.seats.length;i++){const n=(from+i)%h.seats.length;if(h.pending.includes(h.seats[n].id)){h.turn=n;h.deadline=Date.now()+45000;return;}}
+    for(let i=0;i<h.seats.length;i++){const n=(from+i)%h.seats.length;if(h.pending.includes(h.seats[n].id)){h.turn=n;h.firstToAct??=h.seats[n].id;h.deadline=Date.now()+45000;return;}}
   }
   legal(id) {
-    const h=this.hand;if(!h||h.done||h.seats[h.turn]?.id!==id)return null;
+    const h=this.hand;if(!h||h.done||h.transitionAt||h.seats[h.turn]?.id!==id)return null;
     const s=h.seats[h.turn],p=this.player(s),call=Math.max(0,h.currentBet-s.bet);
     const opponentCanBet=h.seats.some(x=>x.id!==id&&!x.folded&&this.player(x).chips>0);
     return {call:Math.min(call,p.chips),toCall:call,minTo:h.currentBet+h.minRaise,maxTo:s.bet+p.chips,
@@ -169,7 +174,7 @@ export class Table {
     if(!automatic)p.timeouts=0;
     h.pending=h.pending.filter(x=>x!==id);this.advance((i+1)%h.seats.length);
   }
-  advance(from=this.hand.turn) {
+  advance(from=this.hand.turn,afterDelay=false) {
     const h=this.hand;
     const live=h.seats.filter(s=>!s.folded);
     if(live.length===1){this.finish(false);return;}
@@ -177,10 +182,11 @@ export class Table {
     const able=live.filter(s=>this.player(s).chips>0);
     if(able.length<=1) h.pending=h.pending.filter(id=>h.seats.find(s=>s.id===id).bet<h.currentBet);
     if(h.pending.length){this.setTurn(from);return;}
+    if(!afterDelay){h.transitionAt=Date.now()+3000;h.deadline=0;return;}
     if(h.street===3){this.finish(true);return;}
     h.street++;h.deck.pop(); const count=h.street===1?3:1;
     for(let i=0;i<count;i++)h.board.push(h.deck.pop());
-    h.seats.forEach(s=>{s.bet=0;s.lastActionBet=null;if(!s.folded)s.lastAction=null;});h.actions=[];h.currentBet=0;h.minRaise=20;
+    h.seats.forEach(s=>{s.bet=0;s.lastActionBet=null;if(!s.folded)s.lastAction=null;});h.actions=[];h.firstToAct=null;h.currentBet=0;h.minRaise=20;
     this.log(`${['','翻牌','转牌','河牌'][h.street]}：${h.board.map(cardText).join(' ')}`);
     h.pending=able.map(s=>s.id);this.advance(1%h.seats.length);
   }
@@ -225,9 +231,9 @@ export class Table {
     return {running:this.running,paused:!!this.paused,number:this.number,message:this.message,nextAt:this.nextAt,eventSeq:this.eventSeq,events:this.events,quickChats:QUICK_CHATS,
       players:this.players.map(p=>({id:p.id,name:p.name,chips:p.chips,seat:p.seat,eliminated:!!p.eliminated,sittingOut:!!p.sittingOut,waiting:!!(this.running&&!h?.seats.some(s=>s.id===p.id)),chat:p.chat&&Date.now()-p.chat.at<6000?p.chat:null})),
       history:this.history,
-      hand:h?{number:h.number,board:h.board,street:h.street,currentBet:h.currentBet,pot:h.done?0:h.seats.reduce((n,s)=>n+s.total,0),done:h.done,deadline:h.deadline,
-        turn:h.done?null:h.seats[h.turn]?.id,dealer:h.seats[0].id,result:h.result,settlement,actions:h.actions||[],
-        seats:h.seats.map(s=>({id:s.id,bet:s.bet,total:s.total,folded:s.folded,lastAction:s.lastAction||null,cards:s.id===id||(h.reveal&&!s.folded)?s.cards:[null,null]}))}:null,
+      hand:h?{number:h.number,board:h.board,street:h.street,currentBet:h.currentBet,pot:h.done?0:h.seats.reduce((n,s)=>n+s.total,0),done:h.done,deadline:h.deadline,transitionAt:h.transitionAt||0,
+        turn:h.done||h.transitionAt?null:h.seats[h.turn]?.id,firstToAct:h.done?null:h.firstToAct||null,dealer:h.seats[0].id,result:h.result,settlement,actions:h.actions||[],
+        seats:h.seats.map(s=>({id:s.id,bet:s.bet,total:s.total,folded:s.folded,lastAction:s.lastAction||null,recentAction:s.recentAction||null,cards:s.id===id||(h.reveal&&!s.folded)?s.cards:[null,null]}))}:null,
       legal:this.paused?null:this.legal(id)};
   }
 }

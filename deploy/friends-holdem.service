@@ -1,0 +1,26 @@
+[Unit]
+Description=Friends Holdem
+After=network.target
+
+[Service]
+Type=simple
+User=holdem
+Group=holdem
+WorkingDirectory=/opt/friends-holdem
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+Environment=DATA_DIR=/var/lib/friends-holdem
+Environment=SECURE_COOKIE=1
+ExecStart=/usr/bin/node /opt/friends-holdem/server.js
+Restart=on-failure
+RestartSec=3
+StateDirectory=friends-holdem
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

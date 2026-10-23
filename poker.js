@@ -1,4 +1,4 @@
-import { randomInt } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 
 export function deck() {
   const cards = Array.from({length:52}, (_, i) => i);
@@ -10,6 +10,9 @@ export const suit = c => Math.floor(c/13);
 export const cardText = c => '♠♥♣♦'[suit(c)] + ({11:'J',12:'Q',13:'K',14:'A'}[rank(c)] || rank(c));
 export const categories = ['高牌','一对','两对','三条','顺子','同花','葫芦','四条','同花顺'];
 export const QUICK_CHATS=['大家好','到你了','我想一想','快一点吧','这手不错','好牌！','谢谢','不好意思','承让啦','再来一手'];
+export const SMALL_BLIND=10,BIG_BLIND=20;
+const BLIND_LEVELS=[10,20,30,50,100,150,200,300,500,1000,1500,2000,3000,5000,10000,20000,50000,100000];
+export function blindsForHand(number){const level=Math.min(BLIND_LEVELS.length-1,Math.max(0,Math.floor((number-1)/5)));return {small:BLIND_LEVELS[level],big:BLIND_LEVELS[level]*2,level:level+1};}
 const score = values => values.concat(Array(6-values.length).fill(0)).reduce((v,n)=>v*15+n,0);
 function five(cards) {
   const rs=cards.map(rank).sort((a,b)=>b-a);
@@ -51,7 +54,10 @@ function handDescription(cards) {
 
 export class Table {
   constructor(saved) {
-    Object.assign(this,{players:[],running:false,hand:null,number:0,dealer:-1,history:[],message:'等待管理员开始',nextAt:0,events:[],eventSeq:0},saved);
+    Object.assign(this,{players:[],running:false,hand:null,number:0,dealer:-1,history:[],message:'等待管理员开始',nextAt:0,events:[],eventSeq:0,topUps:[],topUpSeq:0},saved);
+    if(this.hand&&!this.hand.id)this.hand.id=randomUUID();
+    if(this.hand){this.hand.smallBlind??=SMALL_BLIND;this.hand.bigBlind??=BIG_BLIND;this.hand.blindLevel??=1;}
+    for(const p of this.players)if(!Number.isInteger(p.avatarHue)||p.avatarHue<0||p.avatarHue>=360)p.avatarHue=randomInt(360);
     this.history=this.history.map((entry,i)=>({...entry,seq:entry.seq??i+1}));
     this.logSeq=Math.max(this.logSeq||0,0,...this.history.map(x=>x.seq));
   }
@@ -67,21 +73,78 @@ export class Table {
   add(id,name) {
     if(this.players.length>=9) throw Error('牌桌已满（最多 9 人）');
     if(this.players.some(p=>p.name===name)) throw Error('该名字已被使用，请换一个');
-    const p={id,name,chips:1000,seat:this.players.length,waiting:this.running}; this.players.push(p);
+    const p={id,name,avatarHue:randomInt(360),chips:1000,seat:this.players.length,waiting:this.running}; this.players.push(p);
     this.log(`${name} 加入牌桌${this.running?'，下一手参与':''}`); return p;
+  }
+  requestTopUp(id,amount) {
+    const p=this.players.find(p=>p.id===id);if(!p)throw Error('请先加入牌桌');
+    if(!Number.isSafeInteger(amount)||amount<1||amount>100000)throw Error('补分数量需为 1～100000 的整数');
+    if(this.topUps.some(r=>r.playerId===id&&['pending','approved'].includes(r.status)))throw Error('已有补分申请等待处理或到账');
+    this.topUps=this.topUps.filter(r=>['pending','approved'].includes(r.status)).concat(this.topUps.filter(r=>!['pending','approved'].includes(r.status)).slice(-90));
+    this.topUps.push({id:++this.topUpSeq,playerId:id,name:p.name,amount,status:'pending',at:Date.now()});
+    this.log(`${p.name} 申请补分 ${amount}，等待管理员审批`);
+  }
+  reviewTopUp(requestId,approve,reviewerId) {
+    if(typeof approve!=='boolean')throw Error('请选择同意或拒绝');
+    const r=this.topUps.find(r=>r.id===requestId);if(!r||r.status!=='pending')throw Error('申请已处理或不存在');
+    if(!this.players.some(p=>p.id===r.playerId))throw Error('该玩家已离开牌桌');
+    const total=this.players.reduce((n,p)=>n+p.chips+(p.nextStartTopUp||0),0)+(this.hand&&!this.hand.done?this.hand.seats.reduce((n,s)=>n+s.total,0):0)+this.topUps.filter(r=>r.status==='approved').reduce((n,r)=>n+r.amount,0);
+    if(approve&&!Number.isSafeInteger(total+r.amount))throw Error('积分总额超出上限');
+    r.status=approve?'approved':'rejected';r.reviewedAt=Date.now();r.reviewerId=reviewerId;
+    this.log(`管理员${approve?'同意':'拒绝'} ${r.name} 补分 ${r.amount}${approve&&this.hand&&!this.hand.done?'，本手结算后到账':''}`);
+    if(!this.hand||this.hand.done)this.applyTopUps();
+  }
+  applyTopUps() {
+    for(const r of this.topUps.filter(r=>r.status==='approved')){
+      const p=this.players.find(p=>p.id===r.playerId);
+      if(!p){r.status='cancelled';continue;}
+      p.chips+=r.amount;p.eliminated=false;p.sittingOut=false;p.timeouts=0;
+      if(!this.running)p.nextStartTopUp=(p.nextStartTopUp||0)+r.amount;
+      r.status='applied';r.appliedAt=Date.now();this.log(`${p.name} 补分 ${r.amount} 已到账`);
+    }
+  }
+  cancelTopUps(playerId) {
+    for(const r of this.topUps)if((!playerId||r.playerId===playerId)&&['pending','approved'].includes(r.status)){
+      r.status='cancelled';this.log(`${r.name} 的补分申请已取消（${playerId?'座位移除':'本场重置'}）`);
+    }
+  }
+  showCards(id,handId,indices) {
+    const h=this.hand,s=h?.seats.find(s=>s.id===id);
+    if(!h||h.id!==handId||!s)throw Error('手牌已变化，请重新选择亮牌');
+    if(!Array.isArray(indices)||!indices.length||indices.length>2||indices.some(i=>i!==0&&i!==1)||new Set(indices).size!==indices.length)throw Error('请选择一张或两张手牌');
+    const added=indices.filter(i=>!s.shown?.includes(i));if(!added.length)return;
+    s.shown=[...new Set([...(s.shown||[]),...added])].sort();
+    this.log(`${this.player(s).name} 主动亮牌 ${added.map(i=>cardText(s.cards[i])).join(' ')}`);
+  }
+  potRaiseTo(id,denominator) {
+    if(![4,3,2,1].includes(denominator))throw Error('无效的底池比例');
+    const l=this.legal(id);if(!l?.canRaise||!this.hand.pending.includes(id))throw Error('当前不能加注');
+    const pot=this.hand.seats.reduce((n,s)=>n+s.total,0);
+    const seat=this.hand.seats.find(s=>s.id===id);
+    return Math.min(l.maxTo,Math.max(l.minTo,seat.bet+Math.ceil(pot/denominator)));
+  }
+  react(id,targetId,kind) {
+    const from=this.players.find(p=>p.id===id),target=this.players.find(p=>p.id===targetId);
+    if(!from||!target)throw Error('玩家已离开牌桌');
+    if(!['egg','flower'].includes(kind))throw Error('请选择扔鸡蛋或送花');
+    if(from.lastReactionAt&&Date.now()-from.lastReactionAt<3000)throw Error('互动太快，请稍等 3 秒');
+    const text=kind==='egg'?`向 ${target.name} 扔了一个鸡蛋`:`送给 ${target.name} 一朵花`;
+    const event=this.emit('reaction',{id,name:from.name,targetId,targetName:target.name,kind,text});
+    from.lastReactionAt=event.at;target.reaction=event;this.log(`${from.name} ${text}`);
   }
   start(online=()=>true) {
     if(this.running) throw Error('本场已开始');
     if(this.players.length<2) throw Error('至少需要两个人才能开始');
     if(this.players.filter(p=>online(p.id)).length<2)throw Error('至少需要两位在线玩家才能开始');
-    this.players.forEach(p=>{p.chips=1000;p.eliminated=false;p.waiting=false;p.sittingOut=false;p.timeouts=0;});
+    this.players.forEach(p=>{p.chips=1000+(p.nextStartTopUp||0);p.nextStartTopUp=0;p.eliminated=false;p.waiting=false;p.sittingOut=false;p.timeouts=0;});
     this.paused=false;this.pausedAt=0;
     this.running=true; this.number=0; this.dealer=-1; this.hand=null; this.nextAt=0;
-    this.log('新的一场开始，每人 1000 分，盲注 10 / 20'); this.newHand(online);
+    this.log('新的一场开始，基础积分每人 1000 分，保留开场前已批准补分，盲注 10 / 20'); this.newHand(online);
   }
   end() {
+    this.cancelTopUps();
     if(this.hand&&!this.hand.done)this.log('管理员结束本场：撤销当前未完成手牌');
-    this.players.forEach(p=>{p.chips=1000;p.eliminated=false;p.waiting=false;p.sittingOut=false;p.timeouts=0;});
+    this.players.forEach(p=>{p.chips=1000;p.nextStartTopUp=0;p.eliminated=false;p.waiting=false;p.sittingOut=false;p.timeouts=0;});
     this.log('管理员结束并重置积分，所有玩家恢复为 1000 分');
     this.running=false;this.hand=null;this.nextAt=0;this.paused=false;this.pausedAt=0; this.message='所有玩家积分已重置为 1000，等待管理员开始';
   }
@@ -95,11 +158,12 @@ export class Table {
     this.players.forEach(p=>p.waiting=false);
     do {this.dealer=(this.dealer+1)%this.players.length;} while(!active.includes(this.players[this.dealer]));
     const order=[];for(let i=0;i<this.players.length;i++){const p=this.players[(this.dealer+i)%this.players.length];if(active.includes(p))order.push(p);}
-    const cards=deck();
-    this.hand={number:++this.number,seats:order.map(p=>({id:p.id,cards:[cards.pop(),cards.pop()],total:0,bet:0,folded:false,lastActionBet:null})),deck:cards,board:[],street:0,currentBet:20,minRaise:20,pending:[],turn:0,done:false,reveal:false,result:[],deadline:0};
+    const cards=deck(),blinds=blindsForHand(this.number+1),previousBig=this.hand?.bigBlind||BIG_BLIND;
+    if(blinds.big!==previousBig)this.log(`盲注升至第 ${blinds.level} 档：${blinds.small} / ${blinds.big}，从第 ${this.number+1} 手生效`);
+    this.hand={id:randomUUID(),number:++this.number,smallBlind:blinds.small,bigBlind:blinds.big,blindLevel:blinds.level,seats:order.map(p=>({id:p.id,cards:[cards.pop(),cards.pop()],shown:[],total:0,bet:0,folded:false,lastActionBet:null})),deck:cards,board:[],street:0,currentBet:blinds.big,minRaise:blinds.big,pending:[],turn:0,done:false,reveal:false,result:[],deadline:0};
     const h=this.hand; const sb=order.length===2?0:1,bb=order.length===2?1:2;
-    this.recordAction(order[sb].id,'blind',`小盲 ${this.pay(sb,10)}`);
-    this.recordAction(order[bb].id,'blind',`大盲 ${this.pay(bb,20)}`);
+    this.recordAction(order[sb].id,'blind',`小盲 ${this.pay(sb,blinds.small)}`);
+    this.recordAction(order[bb].id,'blind',`大盲 ${this.pay(bb,blinds.big)}`);
     h.pending=h.seats.filter(s=>this.player(s).chips>0).map(s=>s.id);
     this.log(`第 ${h.number} 手开始，${order[0].name} 为庄家；${order[sb].name} 小盲，${order[bb].name} 大盲`);
     this.setTurn((bb+1)%order.length);this.advance();
@@ -186,7 +250,7 @@ export class Table {
     if(h.street===3){this.finish(true);return;}
     h.street++;h.deck.pop(); const count=h.street===1?3:1;
     for(let i=0;i<count;i++)h.board.push(h.deck.pop());
-    h.seats.forEach(s=>{s.bet=0;s.lastActionBet=null;if(!s.folded)s.lastAction=null;});h.actions=[];h.firstToAct=null;h.currentBet=0;h.minRaise=20;
+    h.seats.forEach(s=>{s.bet=0;s.lastActionBet=null;if(!s.folded)s.lastAction=null;});h.actions=[];h.firstToAct=null;h.currentBet=0;h.minRaise=h.bigBlind;
     this.log(`${['','翻牌','转牌','河牌'][h.street]}：${h.board.map(cardText).join(' ')}`);
     h.pending=able.map(s=>s.id);this.advance(1%h.seats.length);
   }
@@ -211,11 +275,20 @@ export class Table {
     for(const [id,amount] of wins){const p=this.players.find(p=>p.id===id);h.result.push({name:p.name,amount,label:scores.get(id).name});}
     if(reveal)for(const s of live)this.log(`${this.player(s).name} 摊牌 ${s.cards.map(cardText).join(' ')} · ${scores.get(s.id).name}`);
     h.result.forEach(r=>this.log(`${r.name} ${r.label==='退还未被跟注部分'?'收回':'赢得'} ${r.amount} 分 · ${r.label}`));
+    this.applyTopUps();
     this.players.filter(p=>p.chips===0&&!p.eliminated).forEach(p=>{p.eliminated=true;this.log(`${p.name} 分数用完，已下场`);});
     this.message=h.result.map(r=>`${r.name} +${r.amount}（${r.label}）`).join('；');this.nextAt=Date.now()+7000;
   }
   view(id) {
     const h=this.hand;
+    const legal=this.paused?null:this.legal(id);
+    const blinds=h?{small:h.smallBlind,big:h.bigBlind,level:h.blindLevel}:blindsForHand(1);
+    const blindHand=h?.number||0,nextBlindHand=blindsForHand(blindHand+1).big!==blinds.big?blindHand+1:Math.floor(Math.max(0,blindHand-1)/5)*5+6;
+    const nextBlinds=blindsForHand(nextBlindHand);
+    if(legal?.canRaise)legal.potRaises=[4,3,2,1].map(denominator=>{
+      const amount=this.potRaiseTo(id,denominator),seat=h.seats.find(s=>s.id===id),contribution=amount-seat.bet,requested=Math.ceil(h.seats.reduce((n,s)=>n+s.total,0)/denominator);
+      return {denominator,amount,contribution,requested,limit:contribution<requested?'allin':contribution>requested?'minimum':null};
+    });
     let settlement=null;
     if(h?.done){
       const shown=h.reveal?h.seats.filter(s=>!s.folded).map(s=>({id:s.id,...evaluate([...s.cards,...h.board])})).sort((a,b)=>b.score-a.score):[];
@@ -228,12 +301,12 @@ export class Table {
       }).sort((a,b)=>(a.place??99)-(b.place??99)||b.won-a.won);
       settlement={showdown:!!h.reveal,rows,pots:h.pots||[]};
     }
-    return {running:this.running,paused:!!this.paused,number:this.number,message:this.message,nextAt:this.nextAt,eventSeq:this.eventSeq,events:this.events,quickChats:QUICK_CHATS,
-      players:this.players.map(p=>({id:p.id,name:p.name,chips:p.chips,seat:p.seat,eliminated:!!p.eliminated,sittingOut:!!p.sittingOut,waiting:!!(this.running&&!h?.seats.some(s=>s.id===p.id)),chat:p.chat&&Date.now()-p.chat.at<6000?p.chat:null})),
+    return {running:this.running,paused:!!this.paused,smallBlind:blinds.small,blinds:{...blinds,nextHand:nextBlindHand,next:nextBlinds,atMaximum:blinds.big===BLIND_LEVELS.at(-1)*2},number:this.number,message:this.message,nextAt:this.nextAt,eventSeq:this.eventSeq,events:this.events,quickChats:QUICK_CHATS,
+      players:this.players.map(p=>({id:p.id,name:p.name,avatarHue:p.avatarHue,chips:p.chips,seat:p.seat,eliminated:!!p.eliminated,sittingOut:!!p.sittingOut,waiting:!!(this.running&&!h?.seats.some(s=>s.id===p.id)),chat:p.chat&&Date.now()-p.chat.at<6000?p.chat:null,reaction:p.reaction&&Date.now()-p.reaction.at<6000?p.reaction:null})),
       history:this.history,
-      hand:h?{number:h.number,board:h.board,street:h.street,currentBet:h.currentBet,pot:h.done?0:h.seats.reduce((n,s)=>n+s.total,0),done:h.done,deadline:h.deadline,transitionAt:h.transitionAt||0,
+      hand:h?{id:h.id,number:h.number,board:h.board,street:h.street,currentBet:h.currentBet,pot:h.done?0:h.seats.reduce((n,s)=>n+s.total,0),done:h.done,deadline:h.deadline,transitionAt:h.transitionAt||0,
         turn:h.done||h.transitionAt?null:h.seats[h.turn]?.id,firstToAct:h.done?null:h.firstToAct||null,dealer:h.seats[0].id,result:h.result,settlement,actions:h.actions||[],
-        seats:h.seats.map(s=>({id:s.id,bet:s.bet,total:s.total,folded:s.folded,lastAction:s.lastAction||null,recentAction:s.recentAction||null,cards:s.id===id||(h.reveal&&!s.folded)?s.cards:[null,null]}))}:null,
-      legal:this.paused?null:this.legal(id)};
+        seats:h.seats.map(s=>({id:s.id,bet:s.bet,total:s.total,folded:s.folded,shown:h.reveal&&!s.folded?[0,1]:s.shown||[],lastAction:s.lastAction||null,recentAction:s.recentAction||null,cards:s.cards.map((c,i)=>s.id===id||(h.reveal&&!s.folded)||s.shown?.includes(i)?c:null)}))}:null,
+      legal};
   }
 }

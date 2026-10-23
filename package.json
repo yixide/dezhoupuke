@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node server.js", "practice": "node scripts/local-practice.mjs", "test": "node --test poker.test.js server.test.js" },
-  "engines": { "node": ">=22" }
+  "scripts": {
+    "start": "node server.js",
+    "practice": "node scripts/local-practice.mjs",
+    "test": "node --test poker.test.js server.test.js audio.test.js voice.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
 }

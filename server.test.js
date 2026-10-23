@@ -87,6 +87,67 @@ async function connectionFixture(extraEnv={}){
   return{post,status,stream,offline,close};
 }
 
+test('补分审批与亮牌真实 HTTP 权限、单牌隔离、快捷加注和重复提交',async()=>{
+  const f=await connectionFixture(),opened=[];
+  const snap=async cookie=>{const s=await f.stream(cookie);opened.push(s);return s.state;};
+  try{
+    for(const route of ['topup/request','topup/review','show'])assert.equal((await f.post(route,{})).status,401);
+    const admin=(await f.post('join',{name:'管理员',admin:true,password:'test-admin-password'})).cookie;
+    const friend=(await f.post('join',{name:'朋友',password:'test-code'})).cookie;
+    const a=await snap(admin),b=await snap(friend);
+    assert.equal((await f.post('topup/request',{amount:500,playerId:a.me},friend)).status,200);
+    let v=await snap(admin),request=v.topUps[0];assert.equal(request.playerId,b.me);
+    assert.equal((await f.post('topup/review',{requestId:request.id,approve:true},friend)).status,400);
+    assert.equal((await f.post('topup/review',{requestId:request.id,approve:true},admin)).status,200);
+    assert.equal((await f.post('topup/review',{requestId:request.id,approve:true},admin)).status,400);
+    assert.equal((await snap(friend)).players.find(p=>p.id===b.me).chips,1500);
+    await f.post('start',{},admin);v=await snap(admin);const own=await snap(friend);
+    const handId=v.hand.id,privateCards=own.hand.seats.find(s=>s.id===b.me).cards;
+    assert.deepEqual(v.hand.seats.find(s=>s.id===b.me).cards,[null,null]);
+    assert.equal((await f.post('show',{handId,indices:[0],playerId:a.me},friend)).status,200);
+    v=await snap(admin);assert.deepEqual(v.hand.seats.find(s=>s.id===b.me).cards,[privateCards[0],null]);
+    assert.deepEqual((await snap(friend)).hand.seats.find(s=>s.id===a.me).cards,[null,null]);
+    assert.equal((await f.post('show',{handId,indices:[0,1]},friend)).status,200);
+    assert.deepEqual((await snap(admin)).hand.seats.find(s=>s.id===b.me).cards,privateCards);
+    assert.equal((await f.post('topup/request',{amount:200},admin)).status,200);
+    assert.equal((await snap(friend)).topUps.length,1);
+    v=await snap(admin);const queued=v.topUps.find(r=>r.status==='pending');
+    assert.equal((await f.post('topup/review',{requestId:queued.id,approve:true},admin)).status,200);
+    const expected=v.legal.potRaises.find(p=>p.denominator===1).amount;
+    assert.equal(expected,40);assert.equal(v.legal.potRaises[3].contribution,30);
+    assert.equal((await f.post('action',{action:'raise',potFraction:1,handId:'old',street:v.hand.street,currentBet:v.hand.currentBet},admin)).status,400);
+    assert.equal((await f.post('action',{action:'raise',potFraction:0},admin)).status,400);
+    assert.equal((await f.post('action',{action:'raise',potFraction:1,amount:999999},admin)).status,200);
+    v=await snap(admin);assert.equal(v.hand.currentBet,expected);assert.equal(v.topUps.find(r=>r.id===queued.id).status,'approved');
+    assert.equal((await f.post('action',{action:'fold'},friend)).status,200);
+    v=await snap(admin);assert.equal(v.topUps.find(r=>r.id===queued.id).status,'applied');
+    assert.equal(v.players.reduce((n,p)=>n+p.chips,0),2700);
+    await f.post('end',{},admin);await f.post('start',{},admin);
+    assert.equal((await f.post('show',{handId,indices:[0,1]},friend)).status,400);
+    assert.deepEqual((await snap(admin)).hand.seats.find(s=>s.id===b.me).cards,[null,null]);
+  }finally{opened.forEach(s=>s.close());await f.close();}
+});
+
+test('头像与扔鸡蛋送花 HTTP 同步，服务端身份和冷却校验',async()=>{
+  const f=await connectionFixture(),opened=[];
+  try{
+    assert.equal((await f.post('reaction',{targetId:'any',kind:'egg'})).status,401);
+    const a=(await f.post('join',{name:'甲',password:'test-code'})).cookie,b=(await f.post('join',{name:'乙',password:'test-code'})).cookie;
+    const first=await f.stream(a),second=await f.stream(b);opened.push(first,second);
+    assert.ok(first.state.players.every(p=>Number.isInteger(p.avatarHue)));
+    assert.equal((await f.post('reaction',{targetId:second.state.me,kind:'bad'},a)).status,400);
+    assert.equal((await f.post('reaction',{targetId:'missing',kind:'egg'},a)).status,400);
+    assert.equal((await f.post('reaction',{targetId:second.state.me,kind:'egg',id:second.state.me,name:'冒名'},a)).status,200);
+    let update=await second.next();while(!update.events?.some(e=>e.type==='reaction'))update=await second.next();
+    const event=update.events.find(e=>e.type==='reaction');assert.equal(event.id,first.state.me);assert.equal(event.name,'甲');assert.equal(event.targetId,second.state.me);
+    assert.equal((await f.post('reaction',{targetId:second.state.me,kind:'flower'},a)).status,400);
+    assert.equal((await f.post('reaction',{targetId:first.state.me,kind:'flower'},b)).status,200);
+    const reload=await f.stream(a);opened.push(reload);assert.equal(reload.state.historyReset,true);
+    assert.deepEqual(reload.state.players.map(p=>p.avatarHue),first.state.players.map(p=>p.avatarHue));
+    assert.ok(reload.state.players.every(p=>p.chips===1000));
+  }finally{opened.forEach(s=>s.close());await f.close();}
+});
+
 test('同名在线保护、多标签页、离线恢复积分手牌及旧 Cookie 失效',async()=>{
   const f=await connectionFixture(),opened=[];
   try{
@@ -206,4 +267,28 @@ test('仅管理员在线也能重置积分，实时推送且刷新后仍为 1000
     const reload=await f.stream(admin);opened.push(reload);assert.ok(reload.state.players.every(p=>p.chips===1000));
     assert.equal((await f.post('end',{},admin)).status,200);
   }finally{opened.forEach(s=>s.close());await f.close();}
+});
+
+test('语音 HTTP 只转发给其他已登录玩家，互斥、身份、防跨站和断线释放',async()=>{
+  const f=await connectionFixture();let a,b;
+  try{
+    const admin=(await f.post('join',{name:'语音甲',admin:true,password:'test-admin-password'})).cookie;
+    const friend=(await f.post('join',{name:'语音乙',password:'test-code'})).cookie;
+    a=await f.stream(admin);b=await f.stream(friend);
+    assert.equal((await f.post('voice/start')).status,401);
+    assert.equal((await f.post('voice/start',{},admin,{Origin:'https://untrusted.example'})).status,403);
+    const start=await f.post('voice/start',{playerId:b.state.me,name:'伪造'},admin);assert.equal(start.status,200);assert.equal(start.body.speaker.playerId,a.state.me);assert.equal(start.body.speaker.name,'语音甲');
+    const id=start.body.speaker.id;
+    assert.equal((await f.post('voice/start',{},friend)).status,400);
+    assert.equal((await f.post('voice/chunk',{id,seq:0,audio:Buffer.alloc(3200).toString('base64')},friend)).status,400);
+    assert.equal((await f.post('voice/chunk',{id,seq:0,audio:'invalid'},admin)).status,400);
+    const audio=Buffer.alloc(3200,8).toString('base64');assert.equal((await f.post('voice/chunk',{id,seq:0,audio},admin)).status,200);
+    let heard;for(let n=0;n<10;n++){const event=await b.next();if(event.audio){heard=event;break;}}
+    assert.equal(heard.audio,audio);assert.equal(heard.playerId,a.state.me);assert.equal(heard.seq,0);
+    assert.equal((await f.post('voice/stop',{id},friend)).status,200);assert.equal((await f.post('voice/start',{},friend)).status,400);
+    a.close();await f.offline(admin);
+    const after=await f.post('voice/start',{},friend);assert.equal(after.status,200);
+    assert.equal((await f.post('voice/chunk',{id,seq:1,audio},admin)).status,400);
+    await f.post('voice/stop',{id:after.body.speaker.id},friend);
+  }finally{a?.close();b?.close();await f.close();}
 });

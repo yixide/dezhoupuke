@@ -4,6 +4,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { Table } from './poker.js';
+import { VoiceRoom } from './voice.js';
 
 const root=path.dirname(fileURLToPath(import.meta.url));
 const data=process.env.DATA_DIR||path.join(root,'data');mkdirSync(data,{recursive:true,mode:0o700});
@@ -12,6 +13,10 @@ let saved=existsSync(savePath)?JSON.parse(readFileSync(savePath,'utf8')):{};
 let config=saved.config||null;
 const table=new Table(saved.table);
 const sessions=new Map(saved.sessions||[]), streams=new Set(), attempts=new Map();
+const voice=new VoiceRoom((event,data,except)=>{for(const c of streams){
+  if(c.session.playerId===except||c.res.destroyed||c.res.writableLength>65536)continue;
+  c.res.write('event: '+event+'\ndata: '+JSON.stringify(data)+'\n\n');
+}});
 const reconnectGrace=Number(process.env.RECONNECT_GRACE_MS)||5000;
 const presence=new Map(table.players.map(p=>[p.id,{lastSeen:0,offlineAt:Date.now()}]));
 function hasConnection(id){return [...streams].some(c=>c.session.playerId===id);}
@@ -27,7 +32,7 @@ const bootstrap=process.env.SETUP_KEY||randomBytes(18).toString('base64url');
 const hash=s=>{const salt=randomBytes(16).toString('hex');return {salt,value:scryptSync(s,salt,32).toString('hex')};};
 const verify=(s,h)=>!!h&&timingSafeEqual(scryptSync(s,h.salt,32),Buffer.from(h.value,'hex'));
 const persist=()=>{writeFileSync(savePath+'.tmp',JSON.stringify({config,table,sessions:[...sessions]}),{mode:0o600});renameSync(savePath+'.tmp',savePath);};
-function snapshot(session){const view=table.view(session.playerId);view.players.forEach(p=>p.online=connectionState(p.id).online);return {...view,me:session.playerId,admin:!!session.admin,serverTime:Date.now()};}
+function snapshot(session){const view=table.view(session.playerId);view.players.forEach(p=>p.online=connectionState(p.id).online);return {...view,topUps:table.topUps.filter(r=>session.admin||r.playerId===session.playerId),me:session.playerId,admin:!!session.admin,voice:voice.state(),serverTime:Date.now()};}
 function broadcast(except){persist();for(const c of streams){if(c===except)continue;const view=snapshot(c.session);view.history=view.history.filter(x=>x.seq>c.seq);view.events=view.events.filter(x=>x.seq>c.eventSeq);view.historyReset=false;c.seq=table.logSeq;c.eventSeq=table.eventSeq;c.res.write(`data: ${JSON.stringify(view)}\n\n`);}}
 function send(res,code,obj,headers={}){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...headers});res.end(JSON.stringify(obj));}
 function requireAdmin(s){if(!s?.admin)throw Error('需要管理员权限');}
@@ -35,7 +40,7 @@ function pass(value,label,min=4){if(typeof value!=='string'||value.length<min||v
 function sessionFor(req){const token=/\bsession=([a-zA-Z0-9_-]+)/.exec(req.headers.cookie||'')?.[1];return sessions.get(token);}
 function authIp(req){const peer=req.socket.remoteAddress;return process.env.TRUST_PROXY==='1'&&['127.0.0.1','::1','::ffff:127.0.0.1'].includes(peer)?req.headers['x-real-ip']||peer:peer;}
 function acceptedAuth(req){const a=attempts.get(authIp(req));if(a)a.count=Math.max(0,a.count-1);}
-async function body(req){let text='';for await(const chunk of req){text+=chunk;if(text.length>4096)throw Error('请求过大');}return JSON.parse(text||'{}');}
+async function body(req,limit=4096){let text='';for await(const chunk of req){text+=chunk;if(text.length>limit)throw Error('请求过大');}return JSON.parse(text||'{}');}
 const server=http.createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');
   res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
@@ -47,7 +52,7 @@ const server=http.createServer(async(req,res)=>{
       res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});
       const client={res,session,seq:table.logSeq,eventSeq:table.eventSeq,heartbeat:url.searchParams.get('v')==='2'};streams.add(client);touch(session.playerId);
       res.write(`data: ${JSON.stringify({...snapshot(session),historyReset:true})}\n\n`);broadcast(client);
-      req.on('close',()=>{streams.delete(client);if(!hasConnection(session.playerId)){const p=presence.get(session.playerId);if(p)p.offlineAt=Date.now();}broadcast();});return;
+      req.on('close',()=>{streams.delete(client);if(!hasConnection(session.playerId)){voice.disconnect(session.playerId);const p=presence.get(session.playerId);if(p)p.offlineAt=Date.now();}broadcast();});return;
     }
     if(req.method==='POST'&&route.startsWith('/api/')){
       if(req.headers.origin&&new URL(req.headers.origin).host!==req.headers.host){send(res,403,{error:'请求来源无效'});return;}
@@ -56,7 +61,9 @@ const server=http.createServer(async(req,res)=>{
         if(!a||now-a.since>60000){a={since:now,count:0};attempts.set(ip,a);}
         if(++a.count>10){const retryAfter=Math.max(1,Math.ceil((a.since+60000-now)/1000));send(res,429,{error:`密码错误已达 10 次，请 ${retryAfter} 秒后再试`,retryAfter},{'Retry-After':String(retryAfter)});return;}
       }
-      const b=await body(req),s=sessionFor(req);
+      const s=sessionFor(req);
+      if(route.startsWith('/api/voice/')&&(!s||!table.players.some(p=>p.id===s.playerId))){send(res,401,{error:'请先加入牌桌'});return;}
+      const b=await body(req,route==='/api/voice/chunk'?6000:4096);
       if(route==='/api/setup'){
         if(config)throw Error('管理员已设置');
         if(typeof b.key!=='string'||b.key!==bootstrap)throw Error('初始化密钥错误，请查看服务器启动终端');
@@ -88,8 +95,26 @@ const server=http.createServer(async(req,res)=>{
       if(!s){send(res,401,{error:'请先加入牌桌'});return;}
       touch(s.playerId);
       if(route==='/api/heartbeat'){send(res,200,{ok:true});return;}
-      if(route==='/api/action'){if(table.paused)throw Error('牌局已暂停，等待玩家返回');table.act(s.playerId,b.action,b.amount);}
+      if(route.startsWith('/api/voice/')){
+        if(!hasConnection(s.playerId))throw Error('请等待牌桌连接恢复');
+        if(route==='/api/voice/start'){
+          const player=table.players.find(p=>p.id===s.playerId);send(res,200,{ok:true,speaker:voice.start(s.playerId,player.name)});return;
+        }
+        if(route==='/api/voice/chunk')voice.chunk(s.playerId,b);
+        else if(route==='/api/voice/stop')voice.stop(s.playerId,b.id);
+        else throw Error('接口不存在');
+        send(res,200,{ok:true});return;
+      }
+      if(route==='/api/action'){
+        if(table.paused)throw Error('牌局已暂停，等待玩家返回');
+        if(b.potFraction!==undefined&&b.handId!==undefined&&(b.handId!==table.hand?.id||b.street!==table.hand?.street||b.currentBet!==table.hand?.currentBet))throw Error('下注状态已变化，请重新选择加注');
+        table.act(s.playerId,b.action,b.action==='raise'&&b.potFraction!==undefined?table.potRaiseTo(s.playerId,b.potFraction):b.amount);
+      }
+      else if(route==='/api/topup/request')table.requestTopUp(s.playerId,b.amount);
+      else if(route==='/api/topup/review'){requireAdmin(s);table.reviewTopUp(b.requestId,b.approve,s.playerId);}
+      else if(route==='/api/show')table.showCards(s.playerId,b.handId,b.indices);
       else if(route==='/api/chat')table.chat(s.playerId,b.text);
+      else if(route==='/api/reaction')table.react(s.playerId,b.targetId,b.kind);
       else if(route==='/api/resume')table.resume(s.playerId);
       else if(route==='/api/start'){requireAdmin(s);table.start(id=>connectionState(id).online);}
       else if(route==='/api/end'){requireAdmin(s);table.end();}
@@ -98,14 +123,15 @@ const server=http.createServer(async(req,res)=>{
       else if(route==='/api/remove'){
         requireAdmin(s);if(table.running)throw Error('请先结束本场，再移除座位');
         if(b.id===s.playerId)throw Error('不能移除自己');
+        table.cancelTopUps(b.id);
         table.players=table.players.filter(p=>p.id!==b.id);table.players.forEach((p,i)=>p.seat=i);
-        presence.delete(b.id);
+        presence.delete(b.id);voice.disconnect(b.id);
         for(const [token,x] of sessions)if(x.playerId===b.id)sessions.delete(token);
         for(const c of streams)if(c.session.playerId===b.id){c.res.end();streams.delete(c);}
       }else throw Error('接口不存在');
       broadcast();send(res,200,{ok:true});return;
     }
-    if(req.method==='GET'&&['/','/index.html','/app.js','/audio.js','/style.css'].includes(route)){
+    if(req.method==='GET'&&['/','/index.html','/app.js','/audio.js','/betting.js','/voice-client.js','/voice-capture.js','/style.css'].includes(route)){
       const file=route==='/'?'index.html':route.slice(1);
       res.writeHead(200,{'Content-Type':file.endsWith('.js')?'text/javascript; charset=utf-8':file.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8','Cache-Control':'no-cache'});res.end(readFileSync(path.join(root,'public',file)));return;
     }
@@ -114,6 +140,7 @@ const server=http.createServer(async(req,res)=>{
 });
 const timer=setInterval(()=>{
   try{
+    voice.expire();
     if(table.tick(Date.now(),id=>connectionState(id).online,id=>connectionState(id).retryAfter===0))broadcast();
   }catch(e){console.error(e);}
 },250);
